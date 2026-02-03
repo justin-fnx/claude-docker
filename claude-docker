@@ -1,0 +1,242 @@
+#!/bin/bash
+
+# Claude Code Docker 실행 스크립트
+# 사용법: claude-docker [프로젝트경로] [옵션]
+#
+# 사전 준비: 이미지 빌드 필요
+#   cd /path/to/ClaudeDocker && docker build -t claude-docker .
+
+set -e
+
+# 기본값
+IMAGE_NAME="claude-docker"
+PORT="${CLAUDE_DOCKER_PORT:-8000}"
+INTERNAL_PORT="3001"
+TS_AUTHKEY=""
+TS_HOSTNAME=""
+TS_FUNNEL=false
+KEEP_AWAKE=false
+
+# 도움말
+show_help() {
+    echo "Usage: claude-docker [PROJECT_PATH] [OPTIONS]"
+    echo ""
+    echo "Arguments:"
+    echo "  PROJECT_PATH    프로젝트 경로 (기본: 현재 디렉토리)"
+    echo ""
+    echo "Options:"
+    echo "  -p, --port          호스트 노출 포트 (기본: 8000)"
+    echo "  -n, --name          컨테이너 이름"
+    echo "  -d, --detach        백그라운드 실행"
+    echo "  -k, --keep-awake    맥북 sleep 방지 (caffeinate)"
+    echo "  -h, --help          도움말"
+    echo ""
+    echo "Tailscale Options:"
+    echo "  --tailscale KEY     Tailscale 인증키로 네트워크 연결"
+    echo "  --hostname NAME     Tailscale 호스트 이름 (기본: claude-docker)"
+    echo "  --funnel            Tailscale Funnel로 공개 URL 생성"
+    echo ""
+    echo "Examples:"
+    echo "  claude-docker                              # 현재 디렉토리"
+    echo "  claude-docker ./my-project                 # 상대 경로"
+    echo "  claude-docker . -p 9000                    # 포트 변경"
+    echo "  claude-docker . -d                         # 백그라운드 실행"
+    echo "  claude-docker . -d -k                      # 백그라운드 + sleep 방지"
+    echo "  claude-docker . --tailscale tskey-xxx      # Tailscale 연결"
+    echo "  claude-docker . --tailscale tskey-xxx --funnel  # 공개 URL"
+}
+
+# 인자 파싱
+PROJECT_PATH=""
+CONTAINER_NAME=""
+DETACH=false
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        -h|--help)
+            show_help
+            exit 0
+            ;;
+        -p|--port)
+            PORT="$2"
+            shift 2
+            ;;
+        -n|--name)
+            CONTAINER_NAME="$2"
+            shift 2
+            ;;
+        -d|--detach)
+            DETACH=true
+            shift
+            ;;
+        -k|--keep-awake)
+            KEEP_AWAKE=true
+            shift
+            ;;
+        --tailscale)
+            TS_AUTHKEY="$2"
+            shift 2
+            ;;
+        --hostname)
+            TS_HOSTNAME="$2"
+            shift 2
+            ;;
+        --funnel)
+            TS_FUNNEL=true
+            shift
+            ;;
+        -*)
+            echo "Error: Unknown option $1"
+            show_help
+            exit 1
+            ;;
+        *)
+            if [[ -z "$PROJECT_PATH" ]]; then
+                PROJECT_PATH="$1"
+            fi
+            shift
+            ;;
+    esac
+done
+
+# 프로젝트 경로 설정 (기본: 현재 디렉토리)
+if [[ -z "$PROJECT_PATH" ]]; then
+    PROJECT_PATH="."
+fi
+
+# 절대 경로로 변환
+PROJECT_PATH=$(cd "$PROJECT_PATH" 2>/dev/null && pwd)
+
+if [[ ! -d "$PROJECT_PATH" ]]; then
+    echo "Error: 디렉토리가 존재하지 않습니다: $PROJECT_PATH"
+    exit 1
+fi
+
+# 컨테이너 이름 설정 (프로젝트 디렉토리명 기반)
+if [[ -z "$CONTAINER_NAME" ]]; then
+    PROJECT_DIR=$(basename "$PROJECT_PATH")
+    CONTAINER_NAME="claude-code-${PROJECT_DIR}"
+fi
+
+# 이미지 존재 확인
+if ! docker image inspect "$IMAGE_NAME" &>/dev/null; then
+    echo "Error: Docker 이미지 '$IMAGE_NAME'가 없습니다."
+    echo ""
+    echo "먼저 이미지를 빌드하세요:"
+    echo "  cd /path/to/ClaudeDocker && docker build -t claude-docker ."
+    exit 1
+fi
+
+echo "============================================"
+echo "  Claude Code Docker"
+echo "============================================"
+echo "  Project: $PROJECT_PATH"
+echo "  Port:    $PORT -> $INTERNAL_PORT (internal)"
+echo "  Container: $CONTAINER_NAME"
+if [[ "$KEEP_AWAKE" == true ]]; then
+    echo "  Keep Awake: enabled (caffeinate)"
+fi
+if [[ -n "$TS_AUTHKEY" ]]; then
+    echo "  Tailscale: enabled"
+    if [[ "$TS_FUNNEL" == true ]]; then
+        echo "  Funnel: enabled (public URL)"
+    fi
+fi
+echo "============================================"
+
+# Docker 실행 옵션
+DOCKER_OPTS=(
+    --name "$CONTAINER_NAME"
+    -p "$PORT:$INTERNAL_PORT"
+    -v "$PROJECT_PATH:/home/claude/workspace"
+    -v "claude-auth:/home/claude/.claude"
+    -v "claude-code-ui-data:/home/claude/.claude-code-ui"
+    -e "DATABASE_PATH=/home/claude/.claude-code-ui/auth.db"
+)
+
+# 호스트 설정 파일들 (복제용, 읽기 전용)
+if [[ -f "$HOME/.gitconfig" ]]; then
+    DOCKER_OPTS+=(-v "$HOME/.gitconfig:/tmp/host-gitconfig:ro")
+fi
+if [[ -f "$HOME/.claude.json" ]]; then
+    DOCKER_OPTS+=(-v "$HOME/.claude.json:/tmp/host-claude.json:ro")
+fi
+
+# 호스트 Claude 글로벌 디렉토리들 (commands, agents, skills, hooks)
+for dir in commands agents skills hooks; do
+    if [[ -d "$HOME/.claude/$dir" ]]; then
+        DOCKER_OPTS+=(-v "$HOME/.claude/$dir:/tmp/host-claude-$dir:ro")
+    fi
+done
+
+# Tailscale 설정
+if [[ -n "$TS_AUTHKEY" ]]; then
+    DOCKER_OPTS+=(
+        --cap-add NET_ADMIN
+        --cap-add SYS_MODULE
+        --device /dev/net/tun:/dev/net/tun
+        -v "claude-tailscale-${PROJECT_DIR}:/var/lib/tailscale"
+        -e "TS_AUTHKEY=$TS_AUTHKEY"
+    )
+    # hostname: 명시적 지정 또는 프로젝트명 기반 기본값
+    TS_HOSTNAME="${TS_HOSTNAME:-claude-${PROJECT_DIR}}"
+    DOCKER_OPTS+=(-e "TS_HOSTNAME=$TS_HOSTNAME")
+    if [[ "$TS_FUNNEL" == true ]]; then
+        DOCKER_OPTS+=(-e "TS_FUNNEL=true")
+    fi
+fi
+
+# caffeinate 명령 구성
+CAFFEINATE_CMD=""
+if [[ "$KEEP_AWAKE" == true ]]; then
+    # -s: system sleep 방지 (전원 연결 시)
+    # -i: idle sleep 방지
+    # 화면은 꺼져도 됨 (-d 미사용)
+    CAFFEINATE_CMD="caffeinate -s -i"
+fi
+
+# 인터랙티브 모드
+if [[ "$DETACH" == true ]]; then
+    DOCKER_OPTS+=(-d)
+    echo ""
+    echo "[*] 백그라운드로 실행 중..."
+
+    CONTAINER_ID=$(docker run "${DOCKER_OPTS[@]}" "$IMAGE_NAME")
+
+    # caffeinate로 sleep 방지 (백그라운드)
+    if [[ "$KEEP_AWAKE" == true ]]; then
+        echo "[*] Sleep 방지 활성화 (caffeinate)..."
+        # 컨테이너가 실행되는 동안 caffeinate 유지
+        (
+            while docker ps -q --filter "id=$CONTAINER_ID" | grep -q .; do
+                sleep 60
+            done
+        ) &
+        MONITOR_PID=$!
+        $CAFFEINATE_CMD -w $MONITOR_PID &
+        CAFFEINATE_PID=$!
+        echo "[*] Caffeinate PID: $CAFFEINATE_PID (컨테이너 종료 시 자동 해제)"
+    fi
+
+    echo ""
+    echo "  Web UI: http://localhost:$PORT"
+    echo "  터미널: docker exec -it $CONTAINER_NAME bash"
+    echo "  종료:   docker stop $CONTAINER_NAME"
+    if [[ -n "$TS_AUTHKEY" ]]; then
+        echo ""
+        echo "  Tailscale 상태 확인: docker exec $CONTAINER_NAME sudo tailscale status"
+    fi
+else
+    DOCKER_OPTS+=(-it --rm)
+    echo ""
+    echo "[*] 인터랙티브 모드로 실행..."
+    echo "  Web UI: http://localhost:$PORT"
+    echo ""
+
+    if [[ "$KEEP_AWAKE" == true ]]; then
+        echo "[*] Sleep 방지 활성화 (caffeinate)..."
+        $CAFFEINATE_CMD docker run "${DOCKER_OPTS[@]}" "$IMAGE_NAME"
+    else
+        docker run "${DOCKER_OPTS[@]}" "$IMAGE_NAME"
+    fi
+fi
