@@ -10,6 +10,20 @@ if [[ -f "/tmp/host-gitconfig" ]] && [[ ! -f "/home/claude/.gitconfig" ]]; then
     echo "[OK] Git 설정을 복제했습니다."
 fi
 
+# Git credentials 복사 (호스트 credential이 있고, 컨테이너에 없으면)
+if [[ -f "/tmp/host-git-credentials" ]] && [[ ! -f "/home/claude/.git-credentials" ]]; then
+    # 호스트 credentials를 복사하되, 컨테이너 내부에서 수정 가능하도록 복제
+    cp /tmp/host-git-credentials /home/claude/.git-credentials
+    chmod 600 /home/claude/.git-credentials
+    echo "[OK] Git credentials를 복제했습니다."
+
+    # .gitconfig에 credential.helper 설정 확인 및 추가
+    if ! grep -q "credential.helper" /home/claude/.gitconfig 2>/dev/null; then
+        echo "[*] .gitconfig에 credential.helper=store 추가 중..."
+        git config --global credential.helper store
+    fi
+fi
+
 # Claude 설정 확인 (~/.claude.json에서 mcpServers, allowedTools만 추출)
 if [[ ! -f "/home/claude/.claude.json" ]]; then
     echo ""

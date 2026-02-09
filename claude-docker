@@ -36,6 +36,9 @@ show_help() {
     echo "  --hostname NAME     Tailscale 호스트 이름 (기본: claude-docker)"
     echo "  --funnel            Tailscale Funnel로 공개 URL 생성"
     echo ""
+    echo "Git Options:"
+    echo "  --no-git-credentials     Git credential 마운트 비활성화"
+    echo ""
     echo "Clean Options:"
     echo "  --clean             프로젝트 볼륨 정리 (컨테이너 + 볼륨 삭제)"
     echo "  --clean-all         모든 claude-docker 볼륨 정리"
@@ -99,6 +102,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --clean-all)
             CLEAN_ALL=true
+            shift
+            ;;
+        --no-git-credentials)
+            NO_GIT_CREDENTIALS=true
             shift
             ;;
         -*)
@@ -240,6 +247,12 @@ DOCKER_OPTS=(
 if [[ -f "$HOME/.gitconfig" ]]; then
     DOCKER_OPTS+=(-v "$HOME/.gitconfig:/tmp/host-gitconfig:ro")
 fi
+
+# Git credentials 파일 마운트 (존재하고, 비활성화되지 않은 경우)
+if [[ -f "$HOME/.git-credentials" ]] && [[ "$NO_GIT_CREDENTIALS" != true ]]; then
+    DOCKER_OPTS+=(-v "$HOME/.git-credentials:/tmp/host-git-credentials:ro")
+fi
+
 if [[ -f "$HOME/.claude.json" ]]; then
     DOCKER_OPTS+=(-v "$HOME/.claude.json:/tmp/host-claude.json:ro")
 fi
