@@ -85,8 +85,8 @@ if [[ -n "$TS_AUTHKEY" ]]; then
 
     # Funnel 활성화 (공개 URL 생성)
     if [[ "$TS_FUNNEL" == "true" ]]; then
-        echo "[*] Enabling Tailscale Funnel on port 443..."
-        sudo tailscale funnel --bg 443
+        echo "[*] Enabling Tailscale Funnel on port 3001..."
+        sudo tailscale funnel --bg http://localhost:3001
         FUNNEL_URL=$(sudo tailscale funnel status 2>/dev/null | grep -o 'https://[^ ]*' | head -1)
         if [[ -n "$FUNNEL_URL" ]]; then
             echo "[*] Public URL: $FUNNEL_URL"

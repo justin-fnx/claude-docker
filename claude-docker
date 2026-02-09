@@ -36,6 +36,10 @@ show_help() {
     echo "  --hostname NAME     Tailscale 호스트 이름 (기본: claude-docker)"
     echo "  --funnel            Tailscale Funnel로 공개 URL 생성"
     echo ""
+    echo "Clean Options:"
+    echo "  --clean             프로젝트 볼륨 정리 (컨테이너 + 볼륨 삭제)"
+    echo "  --clean-all         모든 claude-docker 볼륨 정리"
+    echo ""
     echo "Examples:"
     echo "  claude-docker                              # 현재 디렉토리"
     echo "  claude-docker ./my-project                 # 상대 경로"
@@ -44,12 +48,16 @@ show_help() {
     echo "  claude-docker . -d -k                      # 백그라운드 + sleep 방지"
     echo "  claude-docker . --tailscale tskey-xxx      # Tailscale 연결"
     echo "  claude-docker . --tailscale tskey-xxx --funnel  # 공개 URL"
+    echo "  claude-docker . --clean                        # 프로젝트 볼륨 정리"
+    echo "  claude-docker --clean-all                      # 모든 볼륨 정리"
 }
 
 # 인자 파싱
 PROJECT_PATH=""
 CONTAINER_NAME=""
 DETACH=false
+CLEAN=false
+CLEAN_ALL=false
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -85,6 +93,14 @@ while [[ $# -gt 0 ]]; do
             TS_FUNNEL=true
             shift
             ;;
+        --clean)
+            CLEAN=true
+            shift
+            ;;
+        --clean-all)
+            CLEAN_ALL=true
+            shift
+            ;;
         -*)
             echo "Error: Unknown option $1"
             show_help
@@ -112,10 +128,76 @@ if [[ ! -d "$PROJECT_PATH" ]]; then
     exit 1
 fi
 
+# 프로젝트 디렉토리명 (볼륨 이름 등에 사용)
+PROJECT_DIR=$(basename "$PROJECT_PATH")
+
 # 컨테이너 이름 설정 (프로젝트 디렉토리명 기반)
 if [[ -z "$CONTAINER_NAME" ]]; then
-    PROJECT_DIR=$(basename "$PROJECT_PATH")
     CONTAINER_NAME="claude-code-${PROJECT_DIR}"
+fi
+
+# --clean-all: 모든 claude-docker 볼륨 정리
+if [[ "$CLEAN_ALL" == true ]]; then
+    echo "[*] 모든 claude-docker 볼륨을 정리합니다..."
+    echo ""
+
+    # 실행 중인 claude-code-* 컨테이너 중지 및 삭제
+    CONTAINERS=$(docker ps -a --filter "name=claude-code-" --format "{{.Names}}" 2>/dev/null)
+    if [[ -n "$CONTAINERS" ]]; then
+        echo "[*] 컨테이너 중지 및 삭제:"
+        for c in $CONTAINERS; do
+            echo "    - $c"
+            docker rm -f "$c" 2>/dev/null || true
+        done
+        echo ""
+    fi
+
+    # claude-docker 관련 볼륨 삭제
+    VOLUMES=$(docker volume ls -q 2>/dev/null | grep -E "^(claude-auth-|claude-code-ui-data-|claude-tailscale-)" || true)
+    if [[ -n "$VOLUMES" ]]; then
+        echo "[*] 볼륨 삭제:"
+        for v in $VOLUMES; do
+            echo "    - $v"
+            docker volume rm "$v" 2>/dev/null || echo "      (사용 중 - 컨테이너 종료 후 재시도)"
+        done
+    else
+        echo "[*] 삭제할 볼륨이 없습니다."
+    fi
+
+    echo ""
+    echo "[OK] 정리 완료."
+    exit 0
+fi
+
+# --clean: 현재 프로젝트 볼륨 정리
+if [[ "$CLEAN" == true ]]; then
+    echo "[*] 프로젝트 '$PROJECT_DIR' 볼륨을 정리합니다..."
+    echo ""
+
+    # 해당 프로젝트 컨테이너 중지 및 삭제
+    if docker ps -a --format "{{.Names}}" | grep -q "^${CONTAINER_NAME}$"; then
+        echo "[*] 컨테이너 삭제: $CONTAINER_NAME"
+        docker rm -f "$CONTAINER_NAME" 2>/dev/null || true
+        echo ""
+    fi
+
+    # 해당 프로젝트 볼륨 삭제
+    FOUND=false
+    for v in "claude-auth-${PROJECT_DIR}" "claude-code-ui-data-${PROJECT_DIR}" "claude-tailscale-${PROJECT_DIR}"; do
+        if docker volume inspect "$v" &>/dev/null; then
+            echo "[*] 볼륨 삭제: $v"
+            docker volume rm "$v" 2>/dev/null || echo "    (사용 중 - 컨테이너 종료 후 재시도)"
+            FOUND=true
+        fi
+    done
+
+    if [[ "$FOUND" == false ]]; then
+        echo "[*] 삭제할 볼륨이 없습니다."
+    fi
+
+    echo ""
+    echo "[OK] 정리 완료."
+    exit 0
 fi
 
 # 이미지 존재 확인
@@ -149,8 +231,8 @@ DOCKER_OPTS=(
     --name "$CONTAINER_NAME"
     -p "$PORT:$INTERNAL_PORT"
     -v "$PROJECT_PATH:/home/claude/workspace"
-    -v "claude-auth:/home/claude/.claude"
-    -v "claude-code-ui-data:/home/claude/.claude-code-ui"
+    -v "claude-auth-${PROJECT_DIR}:/home/claude/.claude"
+    -v "claude-code-ui-data-${PROJECT_DIR}:/home/claude/.claude-code-ui"
     -e "DATABASE_PATH=/home/claude/.claude-code-ui/auth.db"
 )
 

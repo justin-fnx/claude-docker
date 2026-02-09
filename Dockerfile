@@ -13,10 +13,31 @@ RUN apt-get update && apt-get install -y \
     iproute2 \
     ca-certificates \
     sudo \
+    unzip \
     && rm -rf /var/lib/apt/lists/*
+
+# JDK 21 (Eclipse Temurin) 설치
+RUN apt-get update && apt-get install -y wget apt-transport-https gpg && \
+    wget -qO - https://packages.adoptium.net/artifactory/api/gpg/key/public | gpg --dearmor -o /etc/apt/keyrings/adoptium.gpg && \
+    echo "deb [signed-by=/etc/apt/keyrings/adoptium.gpg] https://packages.adoptium.net/artifactory/deb $(. /etc/os-release && echo $VERSION_CODENAME) main" > /etc/apt/sources.list.d/adoptium.list && \
+    apt-get update && apt-get install -y temurin-21-jdk && \
+    rm -rf /var/lib/apt/lists/*
+
+# Gradle 설치
+ENV GRADLE_VERSION=8.12
+RUN wget -q https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip -O /tmp/gradle.zip && \
+    unzip -q /tmp/gradle.zip -d /opt && \
+    ln -s /opt/gradle-${GRADLE_VERSION} /opt/gradle && \
+    rm /tmp/gradle.zip
+ENV GRADLE_HOME=/opt/gradle
+ENV PATH="${GRADLE_HOME}/bin:${PATH}"
 
 # Tailscale 설치
 RUN curl -fsSL https://tailscale.com/install.sh | sh
+
+# npm 패키지 캐시 무효화 (빌드 시 항상 최신 버전 설치)
+# 사용법: docker build --build-arg CACHEBUST=$(date +%s) -t claude-docker .
+ARG CACHEBUST=1
 
 # Claude Code CLI 설치
 RUN npm install -g @anthropic-ai/claude-code
@@ -26,6 +47,9 @@ RUN npm install -g task-master-ai
 
 # Claude Code UI 설치
 RUN npm install -g @siteboon/claude-code-ui
+
+# pnpm 설치
+RUN npm install -g pnpm
 
 # claude 사용자 생성
 RUN useradd -m -s /bin/bash claude && \
