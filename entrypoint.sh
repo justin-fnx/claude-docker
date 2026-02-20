@@ -4,24 +4,30 @@ echo "============================================"
 echo "  Claude Code Docker Environment"
 echo "============================================"
 
+# Docker 소켓 권한 설정 (sibling 컨테이너 실행용)
+if [[ -S /var/run/docker.sock ]]; then
+    DOCKER_GID=$(stat -c '%g' /var/run/docker.sock 2>/dev/null || stat -f '%g' /var/run/docker.sock 2>/dev/null)
+    if [[ -n "$DOCKER_GID" ]]; then
+        sudo groupadd -g "$DOCKER_GID" -o docker-host 2>/dev/null || true
+        sudo usermod -aG docker-host claude 2>/dev/null || true
+    fi
+    # 그룹 설정이 안 되는 경우 대비
+    sudo chmod 666 /var/run/docker.sock 2>/dev/null || true
+    echo "[OK] Docker 소켓 연결됨 (sibling 컨테이너 실행 가능)"
+fi
+
 # Git 설정 복사 (호스트 설정이 있고, 컨테이너에 없으면)
 if [[ -f "/tmp/host-gitconfig" ]] && [[ ! -f "/home/claude/.gitconfig" ]]; then
     cp /tmp/host-gitconfig /home/claude/.gitconfig
     echo "[OK] Git 설정을 복제했습니다."
 fi
 
-# Git credentials 복사 (호스트 credential이 있고, 컨테이너에 없으면)
-if [[ -f "/tmp/host-git-credentials" ]] && [[ ! -f "/home/claude/.git-credentials" ]]; then
-    # 호스트 credentials를 복사하되, 컨테이너 내부에서 수정 가능하도록 복제
-    cp /tmp/host-git-credentials /home/claude/.git-credentials
-    chmod 600 /home/claude/.git-credentials
-    echo "[OK] Git credentials를 복제했습니다."
-
-    # .gitconfig에 credential.helper 설정 확인 및 추가
-    if ! grep -q "credential.helper" /home/claude/.gitconfig 2>/dev/null; then
-        echo "[*] .gitconfig에 credential.helper=store 추가 중..."
-        git config --global credential.helper store
-    fi
+# Git credentials 설정 (GH_TOKEN 환경변수가 있으면)
+if [[ -n "$GH_TOKEN" ]]; then
+    # credential helper를 환경변수 기반으로 설정
+    GITHUB_USER="${GITHUB_USER:-x-access-token}"
+    git config --global credential.helper '!f() { echo "username='"$GITHUB_USER"'"; echo "password='"$GH_TOKEN"'"; }; f'
+    echo "[OK] Git credentials를 설정했습니다. (user: $GITHUB_USER)"
 fi
 
 # Claude 설정 확인 (~/.claude.json에서 mcpServers, allowedTools만 추출)
@@ -110,6 +116,26 @@ if [[ -n "$TS_AUTHKEY" ]]; then
     TS_IP=$(sudo tailscale ip -4 2>/dev/null)
     if [[ -n "$TS_IP" ]]; then
         echo "[*] Tailscale IP: $TS_IP"
+    fi
+fi
+
+# CLAUDE.md에 Docker 네트워크 가이드 주입
+if [[ -n "$DOCKER_NETWORK" ]]; then
+    CLAUDE_MD="/home/claude/workspace/CLAUDE.md"
+    DOCKER_GUIDE="## Docker Environment
+- Docker socket is mounted. You can run sibling containers.
+- When running containers manually (not via Testcontainers), ALWAYS use: \`docker run --network $DOCKER_NETWORK ...\`
+- Access sibling containers by their container name (e.g. \`-h test-pg\`), NOT localhost.
+- Testcontainers works automatically without extra configuration."
+
+    if [[ -f "$CLAUDE_MD" ]]; then
+        if ! grep -q "## Docker Environment" "$CLAUDE_MD"; then
+            printf '\n%s\n' "$DOCKER_GUIDE" >> "$CLAUDE_MD"
+            echo "[OK] CLAUDE.md에 Docker 가이드를 추가했습니다."
+        fi
+    else
+        echo "$DOCKER_GUIDE" > "$CLAUDE_MD"
+        echo "[OK] CLAUDE.md에 Docker 가이드를 생성했습니다."
     fi
 fi
 

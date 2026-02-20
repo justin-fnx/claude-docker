@@ -43,6 +43,11 @@ show_help() {
     echo "  --clean             프로젝트 볼륨 정리 (컨테이너 + 볼륨 삭제)"
     echo "  --clean-all         모든 claude-docker 볼륨 정리"
     echo ""
+    echo "Docker Options:"
+    echo "  Docker 소켓은 자동 마운트됩니다 (sibling 컨테이너 실행 지원)"
+    echo "  컨테이너 내부에서 docker run --network=\$DOCKER_NETWORK 으로"
+    echo "  DB/Redis 등을 띄우면 컨테이너 이름으로 접근 가능"
+    echo ""
     echo "Examples:"
     echo "  claude-docker                              # 현재 디렉토리"
     echo "  claude-docker ./my-project                 # 상대 경로"
@@ -171,6 +176,16 @@ if [[ "$CLEAN_ALL" == true ]]; then
         echo "[*] 삭제할 볼륨이 없습니다."
     fi
 
+    # claude-docker 관련 네트워크 삭제
+    NETWORKS=$(docker network ls -q --filter "name=claude-net-" --format "{{.Name}}" 2>/dev/null || true)
+    if [[ -n "$NETWORKS" ]]; then
+        echo "[*] 네트워크 삭제:"
+        for n in $NETWORKS; do
+            echo "    - $n"
+            docker network rm "$n" 2>/dev/null || echo "      (사용 중 - 컨테이너 종료 후 재시도)"
+        done
+    fi
+
     echo ""
     echo "[OK] 정리 완료."
     exit 0
@@ -198,8 +213,15 @@ if [[ "$CLEAN" == true ]]; then
         fi
     done
 
+    # 해당 프로젝트 네트워크 삭제
+    if docker network inspect "claude-net-${PROJECT_DIR}" &>/dev/null; then
+        echo "[*] 네트워크 삭제: claude-net-${PROJECT_DIR}"
+        docker network rm "claude-net-${PROJECT_DIR}" 2>/dev/null || echo "    (사용 중 - 컨테이너 종료 후 재시도)"
+        FOUND=true
+    fi
+
     if [[ "$FOUND" == false ]]; then
-        echo "[*] 삭제할 볼륨이 없습니다."
+        echo "[*] 삭제할 볼륨/네트워크가 없습니다."
     fi
 
     echo ""
@@ -233,14 +255,24 @@ if [[ -n "$TS_AUTHKEY" ]]; then
 fi
 echo "============================================"
 
+# Docker 네트워크 생성 (sibling 컨테이너 간 통신용)
+NETWORK_NAME="claude-net-${PROJECT_DIR}"
+if ! docker network inspect "$NETWORK_NAME" &>/dev/null; then
+    docker network create "$NETWORK_NAME" >/dev/null
+    echo "[OK] Docker 네트워크 생성: $NETWORK_NAME"
+fi
+
 # Docker 실행 옵션
 DOCKER_OPTS=(
     --name "$CONTAINER_NAME"
+    --network "$NETWORK_NAME"
     -p "$PORT:$INTERNAL_PORT"
     -v "$PROJECT_PATH:/home/claude/workspace"
     -v "claude-auth-${PROJECT_DIR}:/home/claude/.claude"
     -v "claude-code-ui-data-${PROJECT_DIR}:/home/claude/.claude-code-ui"
+    -v "/var/run/docker.sock:/var/run/docker.sock"
     -e "DATABASE_PATH=/home/claude/.claude-code-ui/auth.db"
+    -e "DOCKER_NETWORK=$NETWORK_NAME"
 )
 
 # 호스트 설정 파일들 (복제용, 읽기 전용)
@@ -248,9 +280,24 @@ if [[ -f "$HOME/.gitconfig" ]]; then
     DOCKER_OPTS+=(-v "$HOME/.gitconfig:/tmp/host-gitconfig:ro")
 fi
 
-# Git credentials 파일 마운트 (존재하고, 비활성화되지 않은 경우)
-if [[ -f "$HOME/.git-credentials" ]] && [[ "$NO_GIT_CREDENTIALS" != true ]]; then
-    DOCKER_OPTS+=(-v "$HOME/.git-credentials:/tmp/host-git-credentials:ro")
+# Git credentials 환경변수 전달 (gh auth token 또는 환경변수에서 가져옴)
+if [[ "$NO_GIT_CREDENTIALS" != true ]]; then
+    # 우선순위: 환경변수 > gh auth token
+    _GH_TOKEN="${GH_TOKEN:-${GITHUB_TOKEN:-}}"
+    if [[ -z "$_GH_TOKEN" ]] && command -v gh &>/dev/null; then
+        _GH_TOKEN=$(gh auth token 2>/dev/null || true)
+    fi
+    if [[ -n "$_GH_TOKEN" ]]; then
+        DOCKER_OPTS+=(-e "GH_TOKEN=$_GH_TOKEN")
+        # GitHub 사용자명도 전달
+        _GH_USER="${GITHUB_USER:-}"
+        if [[ -z "$_GH_USER" ]] && command -v gh &>/dev/null; then
+            _GH_USER=$(gh api user --jq '.login' 2>/dev/null || true)
+        fi
+        if [[ -n "$_GH_USER" ]]; then
+            DOCKER_OPTS+=(-e "GITHUB_USER=$_GH_USER")
+        fi
+    fi
 fi
 
 if [[ -f "$HOME/.claude.json" ]]; then

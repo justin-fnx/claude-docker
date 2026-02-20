@@ -16,6 +16,9 @@ RUN apt-get update && apt-get install -y \
     unzip \
     && rm -rf /var/lib/apt/lists/*
 
+# Docker CLI 설치 (호스트 Docker 소켓 마운트용)
+RUN curl -fsSL https://get.docker.com | sh
+
 # JDK 21 (Eclipse Temurin) 설치
 RUN apt-get update && apt-get install -y wget apt-transport-https gpg && \
     wget -qO - https://packages.adoptium.net/artifactory/api/gpg/key/public | gpg --dearmor -o /etc/apt/keyrings/adoptium.gpg && \
@@ -47,6 +50,9 @@ RUN npm install -g task-master-ai
 
 # Claude Code UI 설치
 RUN npm install -g @siteboon/claude-code-ui
+
+# Playwright 설치 (브라우저 + 시스템 의존성)
+RUN npx playwright install --with-deps chromium
 
 # pnpm 설치
 RUN npm install -g pnpm
